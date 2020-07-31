@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta
 import random
 import string
 
-from django.core.mail import send_mail
+from django.core.mail import EmailMessage
 from django.core.cache import cache
 from django.db import DatabaseError
 
@@ -20,26 +20,37 @@ else:
     import logging
     logger = logging.getLogger(__name__)
 
+def send_email(query_id, email_address_list):
+    logger.info("Sending email for query %s..." % query_id)
+    q = Query.objects.get(pk=query_id)
+    exporter = get_exporter_class('csv')(q)
+
+    try:
+        subj = 'Report "%s" is ready' % q.title
+        if app_settings.EMAIL_SAVE_TO_S3:
+            url = s3_upload('%s.csv' % random_part, exporter.get_file_output())
+            msg = 'Download results:\n%s' % url
+            attachment_data = None
+        else:
+            msg = 'Results in attachment:\n'
+            attachment_data = exporter.get_output()
+
+    except DatabaseError as e:
+        subj = 'Error running report %s' % q.title
+        msg = 'Error: %s\nPlease contact an administrator' %  e
+        logger.warning('%s: %s' % (subj, e))
+
+    email = EmailMessage(subj, msg, app_settings.FROM_EMAIL, email_address_list)
+    if attachment_data:
+        email.attach('%s.%s.csv' % (datetime.now().strftime("%Y-%d-%m.%H-%M"), q.title), attachment_data, 'text/csv')
+
+    email.send()
+
+
 
 @task
 def execute_query(query_id, email_address):
-    q = Query.objects.get(pk=query_id)
-    send_mail('[SQL Explorer] Your query is running...',
-              '%s is running and should be in your inbox soon!' % q.title,
-              app_settings.FROM_EMAIL,
-              [email_address])
-
-    exporter = get_exporter_class('csv')(q)
-    random_part = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(20))
-    try:
-        url = s3_upload('%s.csv' % random_part, exporter.get_file_output())
-        subj = '[SQL Explorer] Report "%s" is ready' % q.title
-        msg = 'Download results:\n\r%s' % url
-    except DatabaseError as e:
-        subj = '[SQL Explorer] Error running report %s' % q.title
-        msg = 'Error: %s\nPlease contact an administrator' %  e
-        logger.warning('%s: %s' % (subj, e))
-    send_mail(subj, msg, app_settings.FROM_EMAIL, [email_address])
+    send_email(query_id, [email_address])
 
 
 @task
